@@ -17,12 +17,16 @@ import (
 	"syscall"
 	"time"
 
+	_ "net/http/pprof"
+
 	"github.com/Sirupsen/logrus"
 	"github.com/codegangsta/cli"
 	"github.com/golang/gddo/httputil"
 	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/rancher/rancher-metadata/pkg/metrics"
 	yaml "gopkg.in/yaml.v2"
-	_ "net/http/pprof"
 )
 
 const (
@@ -39,6 +43,12 @@ var (
 	// A key to check for magic traversing of arrays by a string field in them
 	// For example, given: { things: [ {name: 'asdf', stuff: 42}, {name: 'zxcv', stuff: 43} ] }
 	// Both ../things/0/stuff and ../things/asdf/stuff will return 42 because 'asdf' matched the 'anme' field of one of the 'things'.
+	hostname         string
+	httpTotalCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        "http_request_total",
+		Help:        "Total number of HTTP requests since last start",
+		ConstLabels: prometheus.Labels{"service": "rancher-metadata"},
+	}, []string{"code", "method", "hostname"})
 	MAGIC_ARRAY_KEYS = []string{"name", "uuid"}
 )
 
@@ -51,6 +61,7 @@ type ServerConfig struct {
 	listen          string
 	listenReload    string
 	enableXff       bool
+	metrics         bool
 
 	router       *mux.Router
 	reloadRouter *mux.Router
@@ -105,12 +116,19 @@ func getCliApp() *cli.App {
 			Name:  "subscribe",
 			Usage: "Subscribe to Rancher events",
 		},
+		cli.BoolFlag{
+			Name:   "metrics",
+			Usage:  "Turn on prometheus metrics endpoint",
+			EnvVar: "METADATA_METRICS",
+		},
 	}
 
 	return app
 }
 
 func appMain(ctx *cli.Context) error {
+	prometheus.MustRegister(httpTotalCounter)
+
 	if ctx.GlobalBool("debug") {
 		logrus.SetLevel(logrus.DebugLevel)
 	}
@@ -138,6 +156,9 @@ func appMain(ctx *cli.Context) error {
 		ctx.GlobalString("listenReload"),
 		ctx.GlobalBool("xff"),
 	)
+
+	sc.metrics = ctx.GlobalBool("metrics")
+	//sc.metrics = true
 
 	// Start the server
 	sc.Start()
@@ -282,20 +303,57 @@ func (sc *ServerConfig) watchSignals() {
 
 }
 
+func MetricsHTTPHandler(h http.Handler) http.Handler {
+	var err error
+
+	hostname, err = os.Hostname()
+	if err != nil {
+		logrus.Error(err)
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		obsWriter := metrics.NewStatusObserveableResponseWriter(w)
+
+		h.ServeHTTP(obsWriter, r)
+
+		// Do not count the metrics endpoint.
+		if r.RequestURI != "/metrics" {
+			httpTotalCounter.With(prometheus.Labels{
+				"code":     metrics.StatusLabelString(obsWriter.Status()),
+				"method":   r.Method,
+				"hostname": hostname,
+			}).Inc()
+		}
+	})
+}
+
 func (sc *ServerConfig) watchHttp() {
+	var handler http.Handler
+
 	sc.reloadRouter.HandleFunc("/favicon.ico", http.NotFound)
 	sc.reloadRouter.HandleFunc("/v1/reload", sc.httpReload).Methods("POST")
 
+	handler = sc.reloadRouter
+
+	if sc.metrics {
+		handler = MetricsHTTPHandler(sc.reloadRouter)
+	}
+
 	logrus.Info("Listening for Reload on ", sc.listenReload)
-	go http.ListenAndServe(sc.listenReload, sc.reloadRouter)
+	go http.ListenAndServe(sc.listenReload, handler)
 }
 
 func (sc *ServerConfig) RunServer() {
+	var handler http.Handler
 
 	sc.watchSignals()
 	sc.watchHttp()
 
 	sc.router.HandleFunc("/favicon.ico", http.NotFound)
+	sc.router.Handle("/metrics", promhttp.Handler()).
+		Methods("GET").
+		Name("Metrics")
+
 	sc.router.HandleFunc("/", sc.root).
 		Methods("GET", "HEAD").
 		Name("Root")
@@ -313,8 +371,15 @@ func (sc *ServerConfig) RunServer() {
 		Methods("GET", "HEAD").
 		Name("Metadata")
 
+	handler = sc.router
+
+	if sc.metrics {
+		logrus.Infof("using metrics")
+		handler = MetricsHTTPHandler(sc.router)
+	}
+
 	logrus.Info("Listening on ", sc.listen)
-	logrus.Fatal(http.ListenAndServe(sc.listen, sc.router))
+	logrus.Fatal(http.ListenAndServe(sc.listen, handler))
 }
 
 func (sc *ServerConfig) httpReload(w http.ResponseWriter, req *http.Request) {
