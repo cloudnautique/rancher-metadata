@@ -158,7 +158,6 @@ func appMain(ctx *cli.Context) error {
 	)
 
 	sc.metrics = ctx.GlobalBool("metrics")
-	//sc.metrics = true
 
 	// Start the server
 	sc.Start()
@@ -172,11 +171,12 @@ func appMain(ctx *cli.Context) error {
 
 	if ctx.Bool("subscribe") {
 		logrus.Info("Subscribing to events")
-		s := NewSubscriber(os.Getenv("CATTLE_URL"),
+		s := NewSubscriberWithMetrics(os.Getenv("CATTLE_URL"),
 			os.Getenv("CATTLE_ACCESS_KEY"),
 			os.Getenv("CATTLE_SECRET_KEY"),
 			ctx.String("answers"),
-			sc.SetAnswers)
+			sc.SetAnswers,
+			sc.metrics)
 		if err := s.Subscribe(); err != nil {
 			logrus.Fatal("Failed to subscribe", err)
 		}

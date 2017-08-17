@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/Sirupsen/logrus"
 	"github.com/mitchellh/mapstructure"
 	revents "github.com/rancher/event-subscriber/events"
@@ -35,7 +37,12 @@ var (
 			},
 		},
 	}
-	decoder = &MetadataDecoder{}
+	decoder       = &MetadataDecoder{}
+	reloadCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "rancher_metadata_download_and_reload_event_total",
+		Help: "Total number of Metadata download and reload events",
+	}, []string{"hostname"})
+	reloadTimeHistogram = &prometheus.HistogramVec{}
 )
 
 type MetadataDecoder struct {
@@ -51,6 +58,7 @@ type Subscriber struct {
 	answerFile string
 	client     *http.Client
 	kicker     *kicker.Kicker
+	metrics    bool
 }
 
 func init() {
@@ -68,6 +76,49 @@ func NewSubscriber(url, accessKey, secretKey, answerFile string, reload ReloadFu
 		answerFile: answerFile,
 		client:     &http.Client{},
 	}
+	s.kicker = kicker.New(func() {
+		if err := s.downloadAndReload(); err != nil {
+			logrus.Errorf("Failed to download and reload metadata: %v", err)
+		}
+	})
+	return s
+}
+
+func metricsInit() {
+	buckets := []float64{}
+	for i := 0.0; i < 10000.0; i += 25.0 {
+		buckets = append(buckets, i)
+	}
+
+	logrus.Infof("Buckets %v", buckets)
+	// initialize global var
+	reloadTimeHistogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "metadata_download_and_reload_event_time_milliseconds",
+		Help:    "Time to download and reload metadata diffs",
+		Buckets: buckets,
+	}, []string{"hostname"})
+
+	logrus.Infof("Length of metrics %d")
+
+	prometheus.MustRegister(reloadCounter)
+	prometheus.MustRegister(reloadTimeHistogram)
+}
+
+func NewSubscriberWithMetrics(url, accessKey, secretKey, answerFile string, reload ReloadFunc, metrics bool) *Subscriber {
+	s := &Subscriber{
+		url:        url,
+		accessKey:  accessKey,
+		secretKey:  secretKey,
+		reload:     reload,
+		answerFile: answerFile,
+		client:     &http.Client{},
+		metrics:    metrics,
+	}
+
+	if metrics {
+		metricsInit()
+	}
+
 	s.kicker = kicker.New(func() {
 		if err := s.downloadAndReload(); err != nil {
 			logrus.Errorf("Failed to download and reload metadata: %v", err)
@@ -160,6 +211,10 @@ func (s *Subscriber) saveDeltaToFile() error {
 }
 
 func (s *Subscriber) downloadAndReload() error {
+	if s.metrics {
+		reloadCounter.With(prometheus.Labels{"hostname": hostname}).Inc()
+	}
+
 	url := s.url + "/configcontent/metadata-answers?client=v2&requestedVersion=" + GetRequestedVersion()
 	// 1. Download meta
 	req, err := http.NewRequest("GET", url, nil)
@@ -222,7 +277,12 @@ func (s *Subscriber) downloadAndReload() error {
 		return fmt.Errorf("Failed to locate default version")
 	}
 
-	logrus.Infof("Download and reload in: %v", time.Since(start))
+	finishTime := time.Since(start)
+	logrus.Infof("Download and reload in: %v", finishTime)
+	if s.metrics {
+		finishTimeInt64 := finishTime.Nanoseconds() / int64(1000*1000)
+		reloadTimeHistogram.With(prometheus.Labels{"hostname": hostname}).Observe(float64(finishTimeInt64))
+	}
 
 	return nil
 }
