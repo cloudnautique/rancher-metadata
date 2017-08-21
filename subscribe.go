@@ -93,7 +93,7 @@ func metricsInit() {
 	logrus.Infof("Buckets %v", buckets)
 	// initialize global var
 	reloadTimeHistogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "metadata_download_and_reload_event_time_milliseconds",
+		Name:    "rancher_metadata_download_and_reload_event_time_milliseconds",
 		Help:    "Time to download and reload metadata diffs",
 		Buckets: buckets,
 	}, []string{"hostname"})

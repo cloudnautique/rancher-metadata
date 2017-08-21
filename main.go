@@ -350,9 +350,13 @@ func (sc *ServerConfig) RunServer() {
 	sc.watchHttp()
 
 	sc.router.HandleFunc("/favicon.ico", http.NotFound)
-	sc.router.Handle("/metrics", promhttp.Handler()).
-		Methods("GET").
-		Name("Metrics")
+
+	// Order of Routes matters
+	if sc.metrics {
+		sc.router.Handle("/metrics", promhttp.Handler()).
+			Methods("GET").
+			Name("Metrics")
+	}
 
 	sc.router.HandleFunc("/", sc.root).
 		Methods("GET", "HEAD").
